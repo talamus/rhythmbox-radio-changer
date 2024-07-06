@@ -16,12 +16,25 @@ from pprint import pprint
 LOGGER: logging.Logger = None
 
 
+class UnknownCommand(Exception):
+    """Thrown when an unknown command is passed from the command line"""
+    pass
+
+
 class NoStationsToSwitchTo(Exception):
+    """Thrown when there is no station to switch to"""
     pass
 
 
 class RhythmboxInternetRadio:
+    """Choose and play internet radio stations.
+       Uses the command line program `rhythmbox-client`
+       and scans available radio stations from  `~/.local/share/rhythmbox/rhythmdb.xml`.
+    """
     def __init__(self, rating: int = 0) -> None:
+        """Scans available radio stations and checks if something is already playing.
+           :rating: Limit the available radio stations to play with rating.
+        """
         self.rating = rating
         self.current_index = None
         self.stations = list()
@@ -38,7 +51,7 @@ class RhythmboxInternetRadio:
                     "index": index,
                     "location": location,
                     "title": title,
-                    "rating": int(rating.text) if rating else 0,
+                    "rating": 0 if rating is None else int(rating.text.strip()),
                 }
             )
             if title == current_title:
@@ -53,6 +66,10 @@ class RhythmboxInternetRadio:
         self.possible_next_stations = self.get_possible_next_stations()
 
     def get_possible_next_stations(self) -> list[dict]:
+        """Returns a list of possible future choices
+           filtering the list with the required rating
+           and leaving out the station currently playing.
+        """
         if self.current_index is None:
             possible_stations = self.stations
         else:
@@ -83,6 +100,9 @@ class RhythmboxInternetRadio:
         self.play(index)
 
     def play(self, index: int) -> None:
+        """Play a radio station indicated by the index number.
+           Does not care about ratings.
+        """
         result = subprocess.run(
             [
                 "rhythmbox-client",
@@ -97,6 +117,9 @@ class RhythmboxInternetRadio:
         self.possible_next_stations = self.get_possible_next_stations()
 
     def get_currently_playing_title() -> str | None:
+        """Returns the currently playing station title
+           (or `None` if nothing is playing).
+        """
         result = subprocess.run(
             [
                 "rhythmbox-client",
@@ -116,12 +139,12 @@ class RhythmboxInternetRadio:
 
 
 def log(message: str, data: Any = "", level: str = "INFO") -> None:
-    """Write a log message (with extra data)"""
+    """Write a log message (with extra data)."""
     LOGGER.log(getattr(logging, level), message, extra={"data": data})
 
 
 def log_unhandled_exception(exc_type, exc_value, exc_traceback):
-    """Log uncaught exceptions as critical"""
+    """Log uncaught exceptions as critical errors."""
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
@@ -136,6 +159,7 @@ def log_unhandled_exception(exc_type, exc_value, exc_traceback):
 
 
 def main() -> None:
+    """Main CLI progam. Parses arguments and runs the command."""
     if shutil.which("rhythmbox-client") is None:
         raise FileNotFoundError("rhythmbox-client is missing")
 
@@ -165,13 +189,14 @@ def main() -> None:
 
     radio = RhythmboxInternetRadio(cfg.rating)
     try:
-        {
+        command = {
             "n": radio.play_next,
             "p": radio.play_previous,
             "r": radio.play_random,
-        }[cfg.command[0][0].lower()]()
+        }[cfg.command[0][0].lower()]
     except KeyError:
-        log("Unknown command", cfg.command[0], level="ERROR")
+        raise UnknownCommand(cfg.command[0])
+    command()
 
 
 if __name__ == "__main__":
