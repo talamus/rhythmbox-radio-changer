@@ -1,0 +1,185 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import logging
+import argparse
+import random
+import shutil
+from typing import Any
+from collections.abc import Mapping
+import xml.etree.ElementTree as etree
+import subprocess
+
+from pprint import pprint
+
+LOGGER: logging.Logger = None
+
+
+class NoStationsToSwitchTo(Exception):
+    pass
+
+
+class RhythmboxInternetRadio:
+    def __init__(self, rating: int = 0) -> None:
+        self.rating = rating
+        self.current_index = None
+        self.stations = list()
+
+        current_title = RhythmboxInternetRadio.get_currently_playing_title()
+        rhythmdb_filename = os.path.expanduser("~/.local/share/rhythmbox/rhythmdb.xml")
+        tree = etree.parse(rhythmdb_filename)
+        for index, entry in enumerate(tree.findall('./entry[@type="iradio"]')):
+            location = entry.find("location").text.strip()
+            title = entry.find("title").text.strip()
+            rating = entry.find("rating")
+            self.stations.append(
+                {
+                    "index": index,
+                    "location": location,
+                    "title": title,
+                    "rating": int(rating.text) if rating else 0,
+                }
+            )
+            if title == current_title:
+                self.current_index = index
+
+        log("Available stations", self.stations)
+        if self.current_index is not None:
+            log("Current station", self.stations[self.current_index])
+        else:
+            log("Currently not playing a radio station", current_title)
+
+        self.possible_next_stations = self.get_possible_next_stations()
+
+    def get_possible_next_stations(self) -> list[dict]:
+        if self.current_index is None:
+            possible_stations = self.stations
+        else:
+            possible_stations = (
+                self.stations[self.current_index + 1 :]
+                + self.stations[: self.current_index]
+            )
+        possible_stations = list(
+            filter(lambda station: station["rating"] >= self.rating, possible_stations)
+        )
+        if not len(possible_stations):
+            raise NoStationsToSwitchTo(f"rating >= {self.rating}")
+        return possible_stations
+
+    def play_next(self) -> None:
+        index = self.possible_next_stations[0]["index"]
+        log("Playing next station", self.stations[index])
+        self.play(index)
+
+    def play_previous(self) -> None:
+        index = self.possible_next_stations[-1]["index"]
+        log("Playing previous station", self.stations[index])
+        self.play(index)
+
+    def play_random(self) -> None:
+        index = random.choice(self.possible_next_stations)["index"]
+        log("Playing random station", self.stations[index])
+        self.play(index)
+
+    def play(self, index: int) -> None:
+        result = subprocess.run(
+            [
+                "rhythmbox-client",
+                "--no-present",
+                "--play-uri",
+                self.stations[index]["location"],
+            ]
+        )
+        result.check_returncode()
+        log("Started playing", self.stations[index])
+        self.current_index = index
+        self.possible_next_stations = self.get_possible_next_stations()
+
+    def get_currently_playing_title() -> str | None:
+        result = subprocess.run(
+            [
+                "rhythmbox-client",
+                "--no-start",
+                "--no-present",
+                "--print-playing-format",
+                "%tt",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        result.check_returncode()
+        title = result.stdout.strip()
+        title = title if title else None
+        log("Currenty playing title", title)
+        return title
+
+
+def log(message: str, data: Any = "", level: str = "INFO") -> None:
+    """Write a log message (with extra data)"""
+    LOGGER.log(getattr(logging, level), message, extra={"data": data})
+
+
+def log_unhandled_exception(exc_type, exc_value, exc_traceback):
+    """Log uncaught exceptions as critical"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    if logging.root.level < logging.INFO:
+        LOGGER.error(
+            exc_type.__name__,
+            extra={"data": exc_value},
+            exc_info=(exc_type, exc_value, exc_traceback),
+        )
+    else:
+        LOGGER.error(exc_type.__name__, extra={"data": exc_value})
+
+
+def main() -> None:
+    if shutil.which("rhythmbox-client") is None:
+        raise FileNotFoundError("rhythmbox-client is missing")
+
+    program_name = os.path.basename(sys.argv[0])
+
+    parser = argparse.ArgumentParser(
+        prog=program_name,
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="Change Rhythmbox internet radio channels from the command line.",
+        epilog="To get more output set the LOG_LEVEL to INFO:\n"
+        f"LOG_LEVEL=INFO {program_name} ...",
+    )
+    parser.add_argument(
+        "-r",
+        "--rating",
+        default=0,
+        type=int,
+        help="minimum star rating for station to play",
+    )
+    parser.add_argument(
+        "command",
+        help="what will be played next",
+        nargs=1,
+        metavar="next|prev|random",
+    )
+    cfg = parser.parse_args()
+
+    radio = RhythmboxInternetRadio(cfg.rating)
+    try:
+        {
+            "n": radio.play_next,
+            "p": radio.play_previous,
+            "r": radio.play_random,
+        }[cfg.command[0][0].lower()]()
+    except KeyError:
+        log("Unknown command", cfg.command[0], level="ERROR")
+
+
+if __name__ == "__main__":
+    level = os.environ.get("LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(
+        level=level, format="[%(levelname)s] %(message)s: %(data)s", stream=sys.stdout
+    )
+    sys.excepthook = log_unhandled_exception
+    LOGGER = logging.getLogger(__name__)
+    main()
+    sys.exit()
